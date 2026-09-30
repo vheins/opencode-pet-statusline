@@ -1,6 +1,6 @@
 {
   "name": "@vheins/opencode-pet-statusline",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode v1 TUI plugin: an animated Tamagotchi-style pixel pet in the sidebar that reacts to background subagent activity.",
   "type": "module",
   "license": "MIT",
@@ -23,9 +23,15 @@
     "solid-js": ">=1.9.12 <2"
   },
   "peerDependenciesMeta": {
-    "@opentui/core": { "optional": true },
-    "@opentui/solid": { "optional": true },
-    "solid-js": { "optional": true }
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
   },
   "exports": {
     "./tui": {

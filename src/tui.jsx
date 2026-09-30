@@ -30,7 +30,7 @@ import { tmpdir } from "node:os"
 import { getTamagotchiSpriteTemplateBySeed } from "./sprites.js"
 
 const PLUGIN_ID = "pet-statusline"
-const PLUGIN_VERSION = "0.1.0"
+const PLUGIN_VERSION = "0.2.0"
 
 const ARROW_DOWN = "\u25BC" // ▼
 const ARROW_RIGHT = "\u25B6" // ▶
@@ -74,6 +74,16 @@ function renderRow(row, scale) {
 
 /** Read the freshest subagent state file written by the async-agent monitor. */
 function readSubagentState() {
+  // The monitor exports its exact path; trust it when present.
+  const fromEnv = process.env.OPENCODE_SUBAGENT_STATUSLINE_STATE
+  if (typeof fromEnv === "string" && fromEnv.trim()) {
+    try {
+      return JSON.parse(readFileSync(fromEnv, "utf8"))
+    } catch {
+      // fall through to the scan
+    }
+  }
+
   const runtimeDir = process.env.XDG_RUNTIME_DIR || tmpdir()
   const root = join(runtimeDir, "opencode-subagent-statusline")
   let dirs
@@ -86,23 +96,23 @@ function readSubagentState() {
   }
   if (dirs.length === 0) return undefined
 
-  const mine = `pid-${process.pid}`
-  const ordered = dirs.includes(mine)
-    ? [mine, ...dirs.filter((name) => name !== mine)]
-    : dirs
-        .map((name) => {
-          try {
-            return { name, mtime: statSync(join(root, name)).mtimeMs }
-          } catch {
-            return { name, mtime: 0 }
-          }
-        })
-        .sort((a, b) => b.mtime - a.mtime)
-        .map((item) => item.name)
+  // Rank by the state FILE mtime (not the directory mtime): a directory is
+  // touched once at creation, so its mtime says nothing about recent work.
+  const ranked = dirs
+    .map((name) => {
+      const file = join(root, name, "state.json")
+      try {
+        return { name, file, mtime: statSync(file).mtimeMs }
+      } catch {
+        return { name, file, mtime: -1 }
+      }
+    })
+    .filter((item) => item.mtime >= 0)
+    .sort((a, b) => b.mtime - a.mtime)
 
-  for (const name of ordered) {
+  for (const item of ranked) {
     try {
-      const state = JSON.parse(readFileSync(join(root, name, "state.json"), "utf8"))
+      const state = JSON.parse(readFileSync(item.file, "utf8"))
       if (state && typeof state === "object" && state.children) return state
     } catch {
       // try the next instance
@@ -156,6 +166,23 @@ function createActivity() {
   return activity
 }
 
+/**
+ * Is the session the user is looking at currently working? This covers the
+ * common case the subagent state file cannot see: the *main* agent is busy
+ * (thinking, streaming, running a tool) with no background child at all.
+ */
+function sessionBusy(api) {
+  try {
+    const route = api.route.current
+    const sessionID = route?.name === "session" ? route.params?.sessionID : undefined
+    if (!sessionID) return false
+    const status = api.state.session.status(sessionID)
+    return status?.type === "busy" || status?.type === "retry"
+  } catch {
+    return false
+  }
+}
+
 /* ---------------------------------------------------------------- pet view */
 
 function PetView(props) {
@@ -163,16 +190,23 @@ function PetView(props) {
   const [open, setOpen] = createSignal(true)
   const activity = createActivity()
 
+  // Poll the session status on the same cadence: `api.state.session.status()`
+  // is a plain getter, not a reactive signal, so we sample it ourselves.
+  const [busy, setBusy] = createSignal(sessionBusy(props.api))
+  const busyTimer = setInterval(() => setBusy(sessionBusy(props.api)), 700)
+  onCleanup(() => clearInterval(busyTimer))
+
   const scale = resolveScale()
 
   const seed = process.env.PET_SEED || props.api.state.path.directory || "opencode"
   const sprite = getTamagotchiSpriteTemplateBySeed(seed)
 
-  // Mood mirrors the review-agent avatar state machine.
+  // Mood mirrors the review-agent avatar state machine, with the session's own
+  // busy state treated as "processing" so the pet reacts to the main agent too.
   const mood = createMemo(() => {
     const a = activity()
     if (a.error > 0) return "failed"
-    if (a.running > 0) return "processing"
+    if (a.running > 0 || busy()) return "processing"
     if (a.done > 0) return "completed"
     return "sleeping"
   })
@@ -198,7 +232,8 @@ function PetView(props) {
     const a = activity()
     switch (mood()) {
       case "processing":
-        return `${a.running} running`
+        if (a.running > 0) return `${a.running} running`
+        return "working"
       case "completed":
         return "idle"
       case "failed":
